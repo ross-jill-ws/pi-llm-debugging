@@ -1,0 +1,26 @@
+{
+  "name": "@rossz/pi-llm-debugging",
+  "version": "0.1.0",
+  "description": "Saves LLM provider request payloads to the project's .pi folder for per-project debugging",
+  "keywords": [
+    "pi-package",
+    "debugging",
+    "llm",
+    "prompt",
+    "token",
+    "context",
+    "inspect",
+    "logging",
+    "tracing",
+    "optimization"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
