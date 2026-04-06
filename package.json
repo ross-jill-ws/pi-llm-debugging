@@ -1,5 +1,5 @@
 {
-  "name": "@rossz/pi-llm-debugging",
+  "name": "pi-llm-debugging",
   "version": "0.1.0",
   "description": "Saves LLM provider request payloads to the project's .pi folder for per-project debugging",
   "keywords": [
