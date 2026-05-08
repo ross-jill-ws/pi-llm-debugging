@@ -1,6 +1,6 @@
 {
   "name": "pi-llm-debugging",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Saves LLM provider request payloads to the project's .pi folder for per-project debugging",
   "repository": {
     "type": "git",

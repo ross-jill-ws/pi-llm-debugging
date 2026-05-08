@@ -6,6 +6,9 @@
  *   <project>/.pi/pi-llm-debugging/<pi_session_id>/<seq>-req.json
  *   <project>/.pi/pi-llm-debugging/<pi_session_id>/<seq>-res.json
  *
+ * If the provider request fails, the full error response is also written:
+ *   <project>/.pi/pi-llm-debugging/<pi_session_id>/<seq>-error.json
+ *
  * - <seq> is a zero-padded counter (001, 002, ...).
  * - <seq>-req.json contains the exact payload handed to the provider SDK
  *   (captured via pi's `before_provider_request` event).
@@ -60,6 +63,86 @@ type ResponseTarget = { outDir: string; sequence: number } | null;
 let currentTarget: ResponseTarget = null;
 let fetchPatched = false;
 
+function seqPrefix(sequence: number): string {
+  return String(sequence).padStart(3, "0");
+}
+
+function getRequestMethod(
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): string {
+  return (
+    init?.method ||
+    (typeof input !== "string" && !(input instanceof URL)
+      ? (input as Request).method
+      : "GET")
+  ).toUpperCase();
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {};
+  headers.forEach((v, k) => {
+    record[k] = v;
+  });
+  return record;
+}
+
+function serializeError(err: unknown): unknown {
+  if (err instanceof Error) {
+    const cause = (err as Error & { cause?: unknown }).cause;
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+      cause: cause ? serializeError(cause) : undefined,
+    };
+  }
+  return String(err);
+}
+
+function writeJsonSilently(filepath: string, value: unknown) {
+  try {
+    writeFileSync(filepath, JSON.stringify(value, null, 2), "utf-8");
+  } catch {
+    // give up silently — debugging must never break the session
+  }
+}
+
+async function buildResponseRecord(
+  url: string,
+  input: Parameters<typeof fetch>[0],
+  init: Parameters<typeof fetch>[1] | undefined,
+  response: Response,
+  cloned: Response,
+) {
+  const headers = headersToRecord(cloned.headers);
+  const bodyText = await cloned.text();
+
+  const contentType = headers["content-type"] || "";
+  let parsedBody: unknown = undefined;
+  if (contentType.includes("application/json")) {
+    try {
+      parsedBody = JSON.parse(bodyText);
+    } catch {
+      // keep raw text only
+    }
+  }
+
+  return {
+    url,
+    method: getRequestMethod(input, init),
+    ok: response.ok,
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+    // For SSE / text responses, `body` holds the raw stream text.
+    // For JSON responses, `parsedBody` holds the decoded object and
+    // `body` still holds the exact bytes for fidelity.
+    body: bodyText,
+    parsedBody,
+  };
+}
+
 function installFetchInterceptor() {
   if (fetchPatched) return;
   fetchPatched = true;
@@ -78,7 +161,27 @@ function installFetchInterceptor() {
           ? input.toString()
           : (input as Request).url;
 
-    const response = await originalFetch(input as any, init as any);
+    let response: Response;
+    try {
+      response = await originalFetch(input as any, init as any);
+    } catch (err) {
+      // Network/transport failure before an HTTP response exists.
+      // Preserve the thrown error in the same sequence slot and rethrow.
+      if (currentTarget && isProviderUrl(url)) {
+        const target = currentTarget;
+        currentTarget = null;
+        const filepath = join(
+          target.outDir,
+          `${seqPrefix(target.sequence)}-error.json`,
+        );
+        writeJsonSilently(filepath, {
+          url,
+          method: getRequestMethod(input, init),
+          error: serializeError(err),
+        });
+      }
+      throw err;
+    }
 
     // Only intercept known provider traffic, and only if we have a
     // request that hasn't been paired with a response yet.
@@ -91,8 +194,9 @@ function installFetchInterceptor() {
     // (retries, unrelated calls) don't clobber this slot.
     currentTarget = null;
 
-    const filename = `${String(target.sequence).padStart(3, "0")}-res.json`;
-    const filepath = join(target.outDir, filename);
+    const prefix = seqPrefix(target.sequence);
+    const resPath = join(target.outDir, `${prefix}-res.json`);
+    const errorPath = join(target.outDir, `${prefix}-error.json`);
 
     // Tee the body so the caller still gets a fully readable response.
     // For non-streamed JSON responses, .clone() + .text() is enough.
@@ -103,55 +207,40 @@ function installFetchInterceptor() {
     // Fire-and-forget: never block the real request on disk IO.
     void (async () => {
       try {
-        const headers: Record<string, string> = {};
-        cloned.headers.forEach((v, k) => {
-          headers[k] = v;
-        });
-        const bodyText = await cloned.text();
+        const record = await buildResponseRecord(url, input, init, response, cloned);
+        writeJsonSilently(resPath, record);
 
-        const contentType = headers["content-type"] || "";
-        let parsedBody: unknown = undefined;
-        if (contentType.includes("application/json")) {
-          try {
-            parsedBody = JSON.parse(bodyText);
-          } catch {
-            // keep raw text only
-          }
+        // Provider SDKs generally throw on non-2xx responses. Record the
+        // complete error response body separately so failed LLM requests are
+        // easy to find without losing the raw <seq>-res.json trace.
+        if (!response.ok) {
+          writeJsonSilently(errorPath, record);
         }
-
+      } catch (err) {
         const record = {
           url,
-          method: (init?.method || (typeof input !== "string" && !(input instanceof URL) ? (input as Request).method : "GET")).toUpperCase(),
+          method: getRequestMethod(input, init),
+          ok: response.ok,
           status: response.status,
           statusText: response.statusText,
-          headers,
-          // For SSE / text responses, `body` holds the raw stream text.
-          // For JSON responses, `parsedBody` holds the decoded object and
-          // `body` still holds the exact bytes for fidelity.
-          body: bodyText,
-          parsedBody,
+          headers: headersToRecord(response.headers),
+          error: serializeError(err),
         };
-
-        writeFileSync(filepath, JSON.stringify(record, null, 2), "utf-8");
-      } catch (err) {
-        try {
-          writeFileSync(
-            filepath,
-            JSON.stringify(
-              { url, error: (err as Error)?.message || String(err) },
-              null,
-              2,
-            ),
-            "utf-8",
-          );
-        } catch {
-          // give up silently — debugging must never break the session
-        }
+        writeJsonSilently(resPath, record);
+        // If reading the cloned body fails, the provider stream may have failed
+        // mid-flight; keep an error artifact even when the HTTP status was 2xx.
+        writeJsonSilently(errorPath, record);
       }
     })();
 
     return response;
   }) as typeof fetch;
+}
+
+// Format a token count as a compact string (e.g. 1500 → "2K", 500 → "500").
+function fmtTokens(n: number): string {
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return String(n);
 }
 
 export default function (pi: ExtensionAPI) {
@@ -162,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 
   function initSession(ctx: {
     cwd: string;
-    sessionManager: { getSessionId(): string };
+    sessionManager: { getSessionId(): string; getBranch(): Array<any> };
     ui: { setStatus(key: string, value: string | undefined): void };
   }) {
     const sessionId = ctx.sessionManager.getSessionId();
@@ -170,6 +259,34 @@ export default function (pi: ExtensionAPI) {
     sequence = 0;
     mkdirSync(outDir, { recursive: true });
     ctx.ui.setStatus("llm-debugging", `🐛 ${sessionId}`);
+    updateTokenStats(ctx);
+  }
+
+  function updateTokenStats(ctx: {
+    sessionManager: { getBranch(): Array<any> };
+    ui: { setStatus(key: string, value: string | undefined): void };
+  }) {
+    let input = 0;
+    let cacheRead = 0;
+    let output = 0;
+    let turns = 0;
+
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "message" && entry.message?.role === "assistant") {
+        const usage = entry.message.usage;
+        if (usage) {
+          input += usage.input ?? 0;
+          cacheRead += usage.cacheRead ?? 0;
+          output += usage.output ?? 0;
+        }
+        turns++;
+      }
+    }
+
+    ctx.ui.setStatus(
+      "llm-token-stats",
+      `📊 turn ${turns}  input: ${fmtTokens(input)}  cache read: ${fmtTokens(cacheRead)}  output: ${fmtTokens(output)}`,
+    );
   }
 
   pi.on("session_start", async (_event, ctx) => {
@@ -182,6 +299,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_fork", async (_event, ctx) => {
     initSession(ctx);
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    updateTokenStats(ctx);
   });
 
   pi.on("before_provider_request", (_event, ctx) => {

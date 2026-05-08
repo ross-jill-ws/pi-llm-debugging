@@ -16,11 +16,12 @@ pi remove npm:pi-llm-debugging
 
 ## How it works
 
-Every time pi is about to call the LLM, the extension writes **two** JSON files into your project's local `.pi` directory — one for the request, one for the raw provider response:
+Every time pi is about to call the LLM, the extension writes **two** JSON files into your project's local `.pi` directory — one for the request, one for the raw provider response. If the LLM request fails, it also writes a dedicated error artifact:
 
 ```
 .pi/pi-llm-debugging/<session_id>/<seq>-req.json
 .pi/pi-llm-debugging/<session_id>/<seq>-res.json
+.pi/pi-llm-debugging/<session_id>/<seq>-error.json   # only when the request fails
 ```
 
 - **`session_id`** — the current pi session identifier (visible in the footer bar). Resets on `/new`, `/resume`, and `/fork`.
@@ -36,7 +37,8 @@ For example, a session might produce:
     ├── 002-req.json   ← second turn (after a tool call loops back)
     ├── 002-res.json
     ├── 003-req.json
-    └── 003-res.json
+    ├── 003-res.json
+    └── 003-error.json ← only present if turn 3 failed
 ```
 
 **`<seq>-req.json`** is the exact payload the provider receives: the full message history, system prompt, tool definitions, model parameters, and any cache hints. It is captured via pi's `before_provider_request` event.
@@ -47,6 +49,7 @@ For example, a session might produce:
 {
   "url": "https://api.anthropic.com/v1/messages",
   "method": "POST",
+  "ok": true,
   "status": 200,
   "statusText": "OK",
   "headers": { "content-type": "text/event-stream", ... },
@@ -56,6 +59,23 @@ For example, a session might produce:
 ```
 
 For streaming SSE responses, `body` contains the full raw SSE text exactly as sent by the provider, so you can replay or diff it. For non-streamed JSON responses, `parsedBody` holds the decoded object for convenience.
+
+**`<seq>-error.json`** is written when the provider request fails. For HTTP failures (for example 400/401/429/500), it contains the same full response record as `<seq>-res.json`, including headers, raw body, and parsed JSON when available. For transport failures where no HTTP response exists, it contains the request URL/method and the serialized thrown error (`name`, `message`, `stack`, and nested `cause` when available).
+
+Example HTTP error artifact:
+
+```jsonc
+{
+  "url": "https://api.anthropic.com/v1/messages",
+  "method": "POST",
+  "ok": false,
+  "status": 429,
+  "statusText": "Too Many Requests",
+  "headers": { "content-type": "application/json", ... },
+  "body": "{\"error\":{\"type\":\"rate_limit_error\",...}}",
+  "parsedBody": { "error": { "type": "rate_limit_error", /* ... */ } }
+}
+```
 
 ## Walkthrough: a 2-turn session
 
@@ -193,6 +213,8 @@ No guessing, no "works on my machine" — just the bytes that crossed the wire.
 
 **Response-side issues** — Inspect `<seq>-res.json` to see the raw SSE stream, tool-use blocks, stop reason, thinking blocks, cache hits, and token usage reported by the provider. Essential when the model does something surprising and you need to know whether it was the model, the parser, or pi itself.
 
+**Provider failures** — Inspect `<seq>-error.json` when a turn fails to see the full provider error response, including rate-limit payloads, authentication errors, invalid-request details, or transport exceptions.
+
 ## Tips
 
 Add the debugging output to your `.gitignore` so it doesn't end up in version control:
@@ -212,6 +234,9 @@ jq '.parsedBody' .pi/pi-llm-debugging/<session_id>/001-res.json
 
 # Replay a streamed SSE response to stdout
 jq -r '.body' .pi/pi-llm-debugging/<session_id>/001-res.json
+
+# Inspect a failed provider response
+jq . .pi/pi-llm-debugging/<session_id>/001-error.json
 
 # Diff two consecutive request payloads to see what changed
 diff \
