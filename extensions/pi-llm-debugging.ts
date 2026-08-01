@@ -31,6 +31,8 @@ import { join } from "node:path";
 
 // Hostnames we consider "LLM provider" traffic worth capturing.
 const PROVIDER_HOST_PATTERNS: RegExp[] = [
+  /(^|\.)127\.0\.0\.1$/i,
+  /(^|\.)localhost$/i,
   /(^|\.)anthropic\.com$/i,
   /(^|\.)openai\.com$/i,
   /(^|\.)openai\.azure\.com$/i,
