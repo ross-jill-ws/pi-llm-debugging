@@ -43,7 +43,9 @@ For example, a session might produce:
 
 **`<seq>-req.json`** is the exact payload the provider receives: the full message history, system prompt, tool definitions, model parameters, and any cache hints. It is captured via pi's `before_provider_request` event.
 
-**`<seq>-res.json`** is the direct HTTP response from the provider, captured by transparently intercepting `fetch` for known LLM hosts (Anthropic, OpenAI, Gemini, Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Cohere, Perplexity, OpenRouter, …). Each file has this shape:
+**`<seq>-res.json`** is the direct HTTP response from the provider, captured by transparently intercepting `fetch` for known LLM hosts (Anthropic, OpenAI, ChatGPT/codex backend, Gemini, Groq, Mistral, DeepSeek, xAI, Together, Fireworks, Cohere, Perplexity, OpenRouter, Moonshot/Kimi, Zhipu GLM, …). Each file has this shape:
+
+> **Transport caveat:** providers that stream over a WebSocket instead of HTTP fetch (currently pi's `openai-codex` provider, which talks to the ChatGPT backend) never pass through `fetch`, so no `<seq>-res.json` can be captured for them — only `<seq>-req.json` is written. When pi emits its `after_provider_response` event (fetch-based providers), a small `<seq>-res-meta.json` with the response status and headers is also written.
 
 ```jsonc
 {

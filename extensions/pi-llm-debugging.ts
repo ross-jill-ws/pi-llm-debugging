@@ -25,7 +25,7 @@
  * /new, /resume, and /fork.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -33,6 +33,10 @@ import { join } from "node:path";
 const PROVIDER_HOST_PATTERNS: RegExp[] = [
   /(^|\.)anthropic\.com$/i,
   /(^|\.)openai\.com$/i,
+  /(^|\.)chatgpt\.com$/i, // ChatGPT-subscription codex backend (openai-codex provider)
+  /(^|\.)moonshot\.(ai|cn)$/i, // kimi
+  /(^|\.)z\.ai$/i, // zhipu GLM
+  /(^|\.)bigmodel\.cn$/i, // zhipu GLM (mainland endpoint)
   /(^|\.)openai\.azure\.com$/i,
   /(^|\.)googleapis\.com$/i, // gemini / vertex
   /(^|\.)generativelanguage\.googleapis\.com$/i,
@@ -289,15 +293,9 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
+  // session_start fires for startup, /reload, /new, /resume, and fork —
+  // the old session_switch / session_fork events were folded into it.
   pi.on("session_start", async (_event, ctx) => {
-    initSession(ctx);
-  });
-
-  pi.on("session_switch", async (_event, ctx) => {
-    initSession(ctx);
-  });
-
-  pi.on("session_fork", async (_event, ctx) => {
     initSession(ctx);
   });
 
@@ -316,5 +314,16 @@ export default function (pi: ExtensionAPI) {
     // Arm the fetch interceptor to route the very next provider-bound
     // HTTP response into <seq>-res.json.
     currentTarget = { outDir, sequence };
+  });
+
+  // Always record response status + headers via pi's official event. Some
+  // providers (e.g. openai-codex, which streams over a WebSocket to the
+  // ChatGPT backend) never go through globalThis.fetch, so <seq>-res.json
+  // cannot be captured for them — this meta file is the only response
+  // artifact in that case.
+  pi.on("after_provider_response", (event, _ctx) => {
+    if (!outDir) return;
+    const metaPath = join(outDir, `${seqPrefix(sequence)}-res-meta.json`);
+    writeJsonSilently(metaPath, { status: event.status, headers: event.headers });
   });
 }
